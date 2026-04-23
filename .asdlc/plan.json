@@ -1,0 +1,70 @@
+{
+  "strategy": "Bottom-Up",
+  "overview": "task-ui explicitly depends on task-api, so a bottom-up strategy is applied: the API backend is built first as the foundation, and the frontend is built second once the API contract is established. This ensures the frontend can be developed and tested against a real backend, and the dependency graph is satisfied in strict topological order.",
+  "phases": [
+    {
+      "phase": 1,
+      "name": "Foundation Services",
+      "description": "task-api has no dependencies and forms the entire data and business logic layer. It must be implemented first so the frontend has a stable API contract to integrate against.",
+      "components": [
+        {
+          "name": "task-api",
+          "componentType": "service",
+          "language": "Go / net/http",
+          "deployment": "Docker",
+          "responsibilities": [
+            "Persist and manage all task data (title, due date, category, completion state) in an embedded SQLite database.",
+            "Expose a RESTful CRUD API for tasks including create, read, update, delete, and completion toggle operations.",
+            "Support filtering of tasks by category and completion status via query parameters.",
+            "Expose a /categories endpoint returning a distinct sorted list of categories in use.",
+            "Return appropriate 4xx error responses for invalid input and missing resources, and serve a /health endpoint."
+          ],
+          "architectureContext": "task-api is the sole backend service in the system. It is called directly by task-ui via HTTP REST from the browser. No other services depend on it, and it depends on nothing externally — all data is stored in a local SQLite file at /data/tasks.db. It is the authoritative source of truth for all task data.",
+          "keyConsiderations": [
+            "CGO must be enabled for github.com/mattn/go-sqlite3; the multi-stage Dockerfile must install gcc and musl-dev in the builder stage — omitting these will cause build failures.",
+            "SQLite is not safe for concurrent writes by default; ensure the db connection uses WAL mode or a single connection pool (sql.DB with SetMaxOpenConns(1)) to avoid 'database is locked' errors under concurrent requests.",
+            "CORS middleware must handle OPTIONS preflight requests before any route matching, otherwise browser-based requests from task-ui will be blocked.",
+            "dueDate is stored as nullable TEXT (YYYY-MM-DD); accept both null JSON values and empty strings to clear the field, and never coerce empty strings to a zero date.",
+            "UUID generation (github.com/google/uuid) must happen server-side on POST; reject any client-supplied id fields to prevent ID collisions or spoofing."
+          ],
+          "apiContract": "openapi: 3.0.3\ninfo:\n  title: Task API\n  version: 1.0.0\n  description: CRUD API for personal task management\nservers:\n  - url: http://task-api:9090\npaths:\n  /health:\n    get:\n      summary: Health check\n      operationId: healthCheck\n      responses:\n        '200':\n          description: Service is healthy\n          content:\n            application/json:\n              schema:\n                type: object\n                properties:\n                  status:\n                    type: string\n                    example: ok\n  /tasks:\n    get:\n      summary: List all tasks\n      operationId: listTasks\n      parameters:\n        - name: category\n          in: query\n          required: false\n          schema:\n            type: string\n          description: Filter tasks by category\n        - name: completed\n          in: query\n          required: false\n          schema:\n            type: boolean\n          description: Filter tasks by completion status\n      responses:\n        '200':\n          description: List of tasks\n          content:\n            application/json:\n              schema:\n                type: array\n                items:\n                  $ref: '#/components/schemas/Task'\n    post:\n      summary: Create a new task\n      operationId: createTask\n      requestBody:\n        required: true\n        content:\n          application/json:\n            schema:\n              $ref: '#/components/schemas/TaskInput'\n      responses:\n        '201':\n          description: Task created\n          content:\n            application/json:\n              schema:\n                $ref: '#/components/schemas/Task'\n        '400':\n          description: Invalid input\n  /tasks/{id}:\n    get:\n      summary: Get a task by ID\n      operationId: getTask\n      parameters:\n        - name: id\n          in: path\n          required: true\n          schema:\n            type: string\n      responses:\n        '200':\n          description: Task found\n          content:\n            application/json:\n              schema:\n                $ref: '#/components/schemas/Task'\n        '404':\n          description: Task not found\n    put:\n      summary: Update a task\n      operationId: updateTask\n      parameters:\n        - name: id\n          in: path\n          required: true\n          schema:\n            type: string\n      requestBody:\n        required: true\n        content:\n          application/json:\n            schema:\n              $ref: '#/components/schemas/TaskInput'\n      responses:\n        '200':\n          description: Task updated\n          content:\n            application/json:\n              schema:\n                $ref: '#/components/schemas/Task'\n        '400':\n          description: Invalid input\n        '404':\n          description: Task not found\n    delete:\n      summary: Delete a task\n      operationId: deleteTask\n      parameters:\n        - name: id\n          in: path\n          required: true\n          schema:\n            type: string\n      responses:\n        '204':\n          description: Task deleted\n        '404':\n          description: Task not found\n  /tasks/{id}/complete:\n    patch:\n      summary: Toggle task completion status\n      operationId: toggleTaskComplete\n      parameters:\n        - name: id\n          in: path\n          required: true\n          schema:\n            type: string\n      requestBody:\n        required: true\n        content:\n          application/json:\n            schema:\n              type: object\n              required:\n                - completed\n              properties:\n                completed:\n                  type: boolean\n      responses:\n        '200':\n          description: Completion status updated\n          content:\n            application/json:\n              schema:\n                $ref: '#/components/schemas/Task'\n        '404':\n          description: Task not found\n  /categories:\n    get:\n      summary: List all distinct categories in use\n      operationId: listCategories\n      responses:\n        '200':\n          description: List of category strings\n          content:\n            application/json:\n              schema:\n                type: array\n                items:\n                  type: string\ncomponents:\n  schemas:\n    Task:\n      type: object\n      properties:\n        id:\n          type: string\n          format: uuid\n        title:\n          type: string\n        completed:\n          type: boolean\n        dueDate:\n          type: string\n          format: date\n          nullable: true\n        category:\n          type: string\n          nullable: true\n        createdAt:\n          type: string\n          format: date-time\n        updatedAt:\n          type: string\n          format: date-time\n    TaskInput:\n      type: object\n      required:\n        - title\n      properties:\n        title:\n          type: string\n          minLength: 1\n          maxLength: 255\n        dueDate:\n          type: string\n          format: date\n          nullable: true\n        category:\n          type: string\n          nullable: true\n",
+          "dependencies": []
+        }
+      ]
+    },
+    {
+      "phase": 2,
+      "name": "Frontend Application",
+      "description": "task-ui depends on task-api and is built second. With the API contract fully defined and the backend running, the React SPA can be developed and integrated against real endpoints.",
+      "components": [
+        {
+          "name": "task-ui",
+          "componentType": "web-app",
+          "language": "TypeScript / React",
+          "deployment": "Docker",
+          "responsibilities": [
+            "Render a single-page task management interface including a task list, add-task form, and edit modal.",
+            "Fetch and display tasks from task-api with support for filtering by category and completion status.",
+            "Allow users to create, edit, delete, and toggle completion of tasks via the task-api REST endpoints.",
+            "Visually highlight overdue tasks (dueDate before today) and display category badges and due date labels per task.",
+            "Serve the compiled static SPA via Nginx on port 3000, including a /health endpoint and SPA fallback routing."
+          ],
+          "architectureContext": "task-ui is the browser-facing layer of the system. It communicates exclusively with task-api over HTTP REST using the base URL configured via the VITE_API_URL build-time environment variable. It has no backend logic of its own — all state is derived from task-api responses. Nginx serves the compiled static assets and handles the /health check.",
+          "keyConsiderations": [
+            "VITE_API_URL is a build-time variable baked into the bundle by Vite; it must be set correctly at Docker build time (e.g. via --build-arg), not at container runtime, or API calls will silently use the default localhost:9090.",
+            "The Nginx config must include a try_files directive falling back to index.html to support SPA routing; without it, direct URL navigation or page refresh will return 404.",
+            "The category filter dropdown must re-fetch GET /categories after any create or edit mutation, not just on mount, to stay in sync with newly introduced categories.",
+            "The Add Task submit button must be disabled while a POST request is in-flight to prevent duplicate task creation on slow networks or double-clicks.",
+            "Overdue detection must compare dueDate against the client's local date (not UTC midnight), so use a date-only comparison without timezone conversion to avoid tasks appearing overdue one day early in negative-offset timezones."
+          ],
+          "apiContract": "openapi: 3.0.3\ninfo:\n  title: Task UI\n  version: 1.0.0\n  description: Static SPA served by Nginx — no runtime API endpoints.\nservers:\n  - url: http://task-ui:3000\npaths:\n  /health:\n    get:\n      summary: Health check (served by Nginx)\n      operationId: healthCheck\n      responses:\n        '200':\n          description: UI is healthy\n",
+          "dependencies": [
+            "task-api"
+          ]
+        }
+      ]
+    }
+  ],
+  "sourceSpec": "spec-v1",
+  "sourceDesign": "design-v1"
+}
